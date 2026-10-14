@@ -1,471 +1,205 @@
-import QtQuick 2.15
-import QtQuick.Controls 2.15
-import QtQuick.Layouts 1.15
+import QtQuick
+import QtQuick.Window
+import QtQuick.Shapes
 
-ApplicationWindow {
+// Giao diện táp-lô ADAS cho màn hình 3.5 inch NGANG (480x320)
+Window {
     id: root
-    visible: true
     width: 480
     height: 320
-    minimumWidth: 480
-    minimumHeight: 320
-    title: "ADAS 3.5\" HMI Cockpit"
-    color: "#05070d"
-    flags: Qt.Window
+    visible: true
+    color: "#0b0d10"
+    title: "ADAS Dashboard"
 
-    // ─── Bảng màu chuẩn ───────────────────────────────────────────────────────
-    readonly property color colGreen : "#00e676"
-    readonly property color colAmber : "#f59e0b"
-    readonly property color colRed   : "#ef4444"
-    readonly property color colCyan  : "#00f0ff"
-    readonly property color colDim   : "#94a3b8"
+    // ===== Dữ liệu (nối với backend C++/CAN/GPS ở đây) =====
+    property int speed: 49              // km/h
+    property int speedLimit: 60         // biển giới hạn tốc độ
+    property real distance: 5.0         // khoảng cách tới xe phía trước (m)
+    property bool laneDeparture: false  // true khi xe lệch làn
 
-    // Lệch làn: trả về màu thanh tương ứng
-    function laneBarColor(side) {
-        var st = adasBackend.laneStatus
-        if (st === "DEPARTURE_LEFT"  && side === "left")  return colRed
-        if (st === "DEPARTURE_RIGHT" && side === "right") return colRed
-        if (st === "DRIFT_LEFT"      && side === "left")  return colAmber
-        if (st === "DRIFT_RIGHT"     && side === "right") return colAmber
-        return colGreen
-    }
+    readonly property real showCarDistance: 5.0   // từ <= 5 m mới hiện biểu tượng ô tô
+    readonly property real warnDistance: 2.0      // < 2 m: cảnh báo đỏ
 
-    // Thanh sáng lên hay không
-    function laneBarActive(side) {
-        var st = adasBackend.laneStatus
-        if (side === "left"  && (st === "DEPARTURE_LEFT"  || st === "DRIFT_LEFT"))  return true
-        if (side === "right" && (st === "DEPARTURE_RIGHT" || st === "DRIFT_RIGHT")) return true
-        return false
-    }
+    readonly property color okColor: "#2ecc40"
+    readonly property color warnColor: "#ff3b30"
+    readonly property color laneColor: laneDeparture ? warnColor : okColor
+    readonly property bool carVisible: distance > 0 && distance <= showCarDistance
+    readonly property bool collisionWarning: carVisible && distance < warnDistance
+    readonly property bool overSpeed: speed > speedLimit
 
-    property int frameCounter: 0
+    // Hệ số co giãn theo kích thước màn hình (thiết kế gốc 480x320)
+    readonly property real u: Math.min(width / 480, height / 320)
 
-    Connections {
-        target: adasWorker
-        function onFrame_ready(frameId) {
-            root.frameCounter = frameId
-            videoFeed.source = "image://camera/frame?id=" + frameId
-            if (adasBackend.hasLead) {
-                cropThumb.source = "image://camera/crop?id=" + frameId
+    // ===== Hai vạch kẻ làn =====
+    Canvas {
+        id: laneCanvas
+        anchors { left: parent.left; right: parent.right; top: parent.top; bottom: distanceText.top }
+
+        property color lane: root.laneColor
+        onLaneChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+
+        onPaint: {
+            var ctx = getContext("2d")
+            var w = width, h = height
+            ctx.reset()
+
+            var vx = w / 2              // điểm tụ (nằm phía trên canvas cho đỡ chụm)
+            var vy = -h * 0.60
+            var topY = h * 0.06         // điểm kết thúc của vạch
+            var laneOffset = w * 0.34   // khoảng cách từ tâm tới vạch ở đáy
+            var laneThick = w * 0.075   // độ dày vạch ở đáy
+
+            function xAt(side, y) {
+                return vx + side * laneOffset * (y - vy) / (h - vy)
+            }
+            function thickAt(y) {
+                return laneThick * (y - vy) / (h - vy)
+            }
+
+            // gradient trong suốt dần về phía xa
+            var grad = ctx.createLinearGradient(0, h, 0, topY)
+            grad.addColorStop(0.0, Qt.rgba(lane.r, lane.g, lane.b, 1.0))
+            grad.addColorStop(0.55, Qt.rgba(lane.r, lane.g, lane.b, 0.85))
+            grad.addColorStop(1.0, Qt.rgba(lane.r, lane.g, lane.b, 0.0))
+            ctx.fillStyle = grad
+
+            for (var s = -1; s <= 1; s += 2) {
+                var tb = thickAt(h), tt = thickAt(topY)
+                ctx.beginPath()
+                ctx.moveTo(xAt(s, h) - tb / 2, h)
+                ctx.lineTo(xAt(s, topY) - tt / 2, topY)
+                ctx.lineTo(xAt(s, topY) + tt / 2, topY)
+                ctx.lineTo(xAt(s, h) + tb / 2, h)
+                ctx.closePath()
+                ctx.fill()
             }
         }
     }
 
-    // ─── BỐ CỤC: TRÁI 240 px CAMERA | PHẢI 240 px HUD ────────────────────────
-    RowLayout {
-        anchors.fill: parent
-        spacing: 0
+    // ===== Biểu tượng ô tô (nét viền, vector): chỉ hiện khi khoảng cách <= 5 m =====
+    Item {
+        id: carIcon
+        property color carColor: root.collisionWarning ? root.warnColor : root.okColor
 
-        // ─── NỬA TRÁI: CAMERA ────────────────────────────────────────────────
-        Item {
-            Layout.preferredWidth: 240
-            Layout.fillHeight: true
+        width: laneCanvas.height * 0.72
+        height: width * 0.8
+        x: (root.width - width) / 2
+        y: laneCanvas.height * 0.20
 
-            Image {
-                id: videoFeed
-                anchors.fill: parent
-                fillMode: Image.PreserveAspectCrop
-                cache: false
-                source: "image://camera/frame?id=0"
+        opacity: root.carVisible ? 1 : 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: 200 } }
+
+        layer.enabled: true     // khử răng cưa
+        layer.samples: 4
+
+        Shape {
+            width: 100
+            height: 80
+            scale: carIcon.width / 100
+            transformOrigin: Item.TopLeft
+
+            // thân xe, mui xe, đèn hậu, biển số
+            ShapePath {
+                strokeColor: carIcon.carColor
+                strokeWidth: 5
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+
+                PathSvg { path: "M 17 32 L 83 32 Q 92 32 92 41 L 92 54 Q 92 63 83 63 L 17 63 Q 8 63 8 54 L 8 41 Q 8 32 17 32 Z" }
+                PathSvg { path: "M 20 32 L 27 13 Q 28 9 33 9 L 67 9 Q 72 9 73 13 L 80 32" }
+                PathSvg { path: "M 17 45 L 31 45 M 69 45 L 83 45" }
+                PathSvg { path: "M 40 52 L 60 52" }
             }
 
-            // Thanh trên: nhãn CAMERA + FPS
-            Rectangle {
-                anchors.top: parent.top
-                anchors.left: parent.left
-                anchors.right: parent.right
-                height: 22
-                color: "#bb05070d"
+            // bánh xe
+            ShapePath {
+                strokeColor: carIcon.carColor
+                strokeWidth: 9
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 6
-                    anchors.rightMargin: 6
-                    spacing: 4
-
-                    Rectangle { width: 5; height: 5; radius: 2.5; color: colCyan }
-                    Text {
-                        text: "CAMERA AI"
-                        color: colCyan
-                        font.pixelSize: 8
-                        font.bold: true
-                    }
-                    Item { Layout.fillWidth: true }
-                    Text {
-                        text: adasBackend.fps.toFixed(0) + " FPS"
-                        color: adasBackend.fps >= 25 ? colGreen : (adasBackend.fps >= 15 ? colAmber : colRed)
-                        font.pixelSize: 8
-                        font.bold: true
-                    }
-                }
-            }
-
-            // Cảnh báo va chạm / lệch làn ở đáy camera
-            Rectangle {
-                visible: adasBackend.threatLevel > 0 || adasBackend.laneStatus !== "NORMAL"
-                anchors.bottom: parent.bottom
-                anchors.left: parent.left
-                anchors.right: parent.right
-                height: 22
-                color: adasBackend.threatLevel === 2 ? "#cc dc2626" : "#cc d97706"
-
-                Text {
-                    anchors.centerIn: parent
-                    text: adasBackend.warningText !== "" ? adasBackend.warningText : adasBackend.laneText
-                    color: "#ffffff"
-                    font.pixelSize: 8
-                    font.bold: true
-                    elide: Text.ElideRight
-                }
-            }
-        }
-
-        // ─── ĐƯỜNG KẺ NGĂN ───────────────────────────────────────────────────
-        Rectangle {
-            Layout.preferredWidth: 1
-            Layout.fillHeight: true
-            color: "#1e293b"
-        }
-
-        // ─── NỬA PHẢI: HUD ADAS ──────────────────────────────────────────────
-        Item {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-
-            // Nền đen AMOLED
-            Rectangle { anchors.fill: parent; color: "#020408" }
-
-            // ─── THANH TRÊN: BIỂN BÁO + TỐC ĐỘ ─────────────────────────────
-            RowLayout {
-                id: topBar
-                anchors.top: parent.top
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.topMargin: 6
-                anchors.leftMargin: 8
-                anchors.rightMargin: 8
-                height: 48
-                spacing: 6
-
-                // Biển báo tốc độ (hình tròn đỏ trắng)
-                Rectangle {
-                    visible: adasBackend.hasSign
-                    width: 42; height: 42; radius: 21
-                    color: "#ffffff"
-                    border.color: colRed
-                    border.width: 5
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: {
-                            var c = adasBackend.signCode
-                            if (c.indexOf("P.") !== -1) return c.replace("P.", "")
-                            return c !== "" ? c : "60"
-                        }
-                        color: "#000000"
-                        font.pixelSize: 14
-                        font.bold: true
-                    }
-                }
-
-                // Placeholder khi chưa có biển
-                Item {
-                    visible: !adasBackend.hasSign
-                    width: 42; height: 42
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: 36; height: 36; radius: 18
-                        color: "#0f172a"
-                        border.color: "#334155"; border.width: 2
-                        Text {
-                            anchors.centerIn: parent
-                            text: "🚫"
-                            font.pixelSize: 14
-                        }
-                    }
-                }
-
-                // Tên biển báo
-                ColumnLayout {
-                    spacing: 1
-                    Layout.fillWidth: true
-
-                    Text {
-                        text: adasBackend.hasSign ? adasBackend.signName : "Chưa phát hiện biển"
-                        color: adasBackend.hasSign ? "#ffffff" : colDim
-                        font.pixelSize: 9
-                        font.bold: true
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                    }
-                    Text {
-                        text: adasBackend.hasSign ? ("Code: " + adasBackend.signCode) : "Đang quét..."
-                        color: colDim
-                        font.pixelSize: 7
-                        Layout.fillWidth: true
-                    }
-                }
-
-                // Tốc độ xe
-                ColumnLayout {
-                    spacing: -2
-                    Text {
-                        text: adasBackend.speed > 0 ? adasBackend.speed : "--"
-                        color: "#ffffff"
-                        font.pixelSize: 26
-                        font.bold: true
-                        font.italic: true
-                        Layout.alignment: Qt.AlignRight
-                    }
-                    Text {
-                        text: "km/h"
-                        color: colDim
-                        font.pixelSize: 8
-                        font.italic: true
-                        Layout.alignment: Qt.AlignRight
-                    }
-                }
-            }
-
-            // ─── VÙNG GIỮA: THANH LÀN TRÁI + XE + THANH LÀN PHẢI ───────────
-            Item {
-                id: midZone
-                anchors.top: topBar.bottom
-                anchors.bottom: bottomBar.top
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.topMargin: 4
-
-                // ── THANH LÀN TRÁI ──────────────────────────────────────────
-                Column {
-                    id: leftLaneBars
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.left: parent.left
-                    anchors.leftMargin: 6
-                    spacing: 4
-
-                    Repeater {
-                        model: 5
-                        Rectangle {
-                            width: 14 + index * 3
-                            height: 6
-                            radius: 3
-                            // Sáng dần từ trên xuống (index 0 mờ nhất)
-                            opacity: laneBarActive("left") ? (0.4 + index * 0.15) : 0.18
-                            color: laneBarColor("left")
-
-                            Behavior on color    { ColorAnimation  { duration: 200 } }
-                            Behavior on opacity  { NumberAnimation { duration: 200 } }
-
-                            // Hiệu ứng nháy khi cảnh báo đỏ
-                            SequentialAnimation on opacity {
-                                running: adasBackend.laneStatus === "DEPARTURE_LEFT"
-                                loops: Animation.Infinite
-                                NumberAnimation { to: 1.0; duration: 180 }
-                                NumberAnimation { to: 0.2; duration: 180 }
-                            }
-                        }
-                    }
-
-                    // Nhãn L
-                    Text {
-                        text: "L"
-                        color: laneBarColor("left")
-                        font.pixelSize: 9
-                        font.bold: true
-                        Behavior on color { ColorAnimation { duration: 200 } }
-                    }
-                }
-
-                // ── THANH LÀN PHẢI ──────────────────────────────────────────
-                Column {
-                    id: rightLaneBars
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.right: parent.right
-                    anchors.rightMargin: 6
-                    spacing: 4
-
-                    Repeater {
-                        model: 5
-                        Rectangle {
-                            width: 14 + (4 - index) * 3   // Rộng dần từ dưới lên
-                            height: 6
-                            radius: 3
-                            anchors.right: parent ? parent.right : undefined
-                            opacity: laneBarActive("right") ? (0.4 + (4 - index) * 0.15) : 0.18
-                            color: laneBarColor("right")
-
-                            Behavior on color    { ColorAnimation  { duration: 200 } }
-                            Behavior on opacity  { NumberAnimation { duration: 200 } }
-
-                            SequentialAnimation on opacity {
-                                running: adasBackend.laneStatus === "DEPARTURE_RIGHT"
-                                loops: Animation.Infinite
-                                NumberAnimation { to: 1.0; duration: 180 }
-                                NumberAnimation { to: 0.2; duration: 180 }
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "R"
-                        color: laneBarColor("right")
-                        font.pixelSize: 9
-                        font.bold: true
-                        Behavior on color { ColorAnimation { duration: 200 } }
-                    }
-                }
-
-                // ── TRUNG TÂM: ICON XE + KHOẢNG CÁCH ────────────────────────
-                Column {
-                    anchors.centerIn: parent
-                    spacing: 4
-
-                    // Hình xe phía trước
-                    Item {
-                        width: 54; height: 50
-                        anchors.horizontalCenter: parent.horizontalCenter
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 10
-                            color: "transparent"
-                            border.color: {
-                                if (!adasBackend.hasLead)           return "#334155"
-                                if (adasBackend.threatLevel === 2)  return colRed
-                                if (adasBackend.threatLevel === 1)  return colAmber
-                                return colGreen
-                            }
-                            border.width: 2
-
-                            Behavior on border.color { ColorAnimation { duration: 200 } }
-
-                            SequentialAnimation on border.color {
-                                running: adasBackend.threatLevel === 2
-                                loops: Animation.Infinite
-                                ColorAnimation { from: colRed; to: "#ffffff"; duration: 200 }
-                                ColorAnimation { from: "#ffffff"; to: colRed; duration: 200 }
-                            }
-                        }
-
-                        // Thumbnail xe thật nếu có
-                        Image {
-                            id: cropThumb
-                            anchors.fill: parent
-                            anchors.margins: 4
-                            fillMode: Image.PreserveAspectCrop
-                            visible: adasBackend.hasLead
-                            source: "image://camera/crop?id=0"
-                            opacity: 0.9
-                        }
-
-                        // Icon xe mặc định khi chưa phát hiện
-                        Text {
-                            anchors.centerIn: parent
-                            visible: !adasBackend.hasLead
-                            text: "🚗"
-                            font.pixelSize: 22
-                            opacity: 0.4
-                        }
-                    }
-
-                    // Khoảng cách to
-                    Text {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        text: {
-                            if (adasBackend.hasLead && adasBackend.leadDist > 0)
-                                return adasBackend.leadDist.toFixed(1) + " m"
-                            return "-- m"
-                        }
-                        color: {
-                            if (!adasBackend.hasLead)              return colDim
-                            if (adasBackend.leadDist <= 12)        return colRed
-                            if (adasBackend.leadDist <= 22)        return colAmber
-                            return "#ffffff"
-                        }
-                        font.pixelSize: 28
-                        font.bold: true
-                        font.family: "Segoe UI, Arial"
-
-                        Behavior on color { ColorAnimation { duration: 200 } }
-                    }
-
-                    // TTC nhỏ bên dưới
-                    Text {
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        text: adasBackend.leadTtc !== "--" ? "TTC " + adasBackend.leadTtc : "KHOẢNG CÁCH"
-                        color: colDim
-                        font.pixelSize: 8
-                        font.bold: true
-                    }
-                }
-            }
-
-            // ─── THANH DƯỚI: TRẠNG THÁI LÀN + NÚT TẠM DỪNG ─────────────────
-            Rectangle {
-                id: bottomBar
-                anchors.bottom: parent.bottom
-                anchors.left: parent.left
-                anchors.right: parent.right
-                height: 24
-                color: {
-                    var st = adasBackend.laneStatus
-                    if (st === "DEPARTURE_LEFT" || st === "DEPARTURE_RIGHT") return "#b91c1c"
-                    if (st === "DRIFT_LEFT"     || st === "DRIFT_RIGHT")     return "#92400e"
-                    return "#0f172a"
-                }
-
-                Behavior on color { ColorAnimation { duration: 250 } }
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 8
-                    anchors.rightMargin: 8
-                    spacing: 6
-
-                    Text {
-                        text: {
-                            var st = adasBackend.laneStatus
-                            if (st === "DEPARTURE_LEFT")  return "⚠ LỆCH TRÁI"
-                            if (st === "DEPARTURE_RIGHT") return "⚠ LỆCH PHẢI"
-                            if (st === "DRIFT_LEFT")      return "↙ Bám mép trái"
-                            if (st === "DRIFT_RIGHT")     return "↘ Bám mép phải"
-                            if (st === "NO_LANE")         return "Mất vạch làn"
-                            return "✓ Giữ làn tốt"
-                        }
-                        color: "#ffffff"
-                        font.pixelSize: 8
-                        font.bold: true
-                        Layout.fillWidth: true
-                        elide: Text.ElideRight
-                    }
-
-                    // Nút tạm dừng
-                    Rectangle {
-                        width: 22; height: 18; radius: 4; color: "#1e293b"
-                        Text { anchors.centerIn: parent; text: "⏯"; color: "#fff"; font.pixelSize: 10 }
-                        MouseArea { anchors.fill: parent; onClicked: adasBackend.togglePlay() }
-                    }
-                }
+                PathSvg { path: "M 24 67 L 24 71 M 76 67 L 76 71" }
             }
         }
     }
 
-    // ─── VIỀN ĐỎ NHẤP NHÁY TOÀN MÀN HÌNH KHI CẤP 2 ────────────────────────
+    // ===== Biển giới hạn tốc độ (trái) =====
     Rectangle {
-        id: dangerBorder
-        anchors.fill: parent
-        color: "transparent"
-        border.color: colRed
-        border.width: 4
-        visible: adasBackend.threatLevel === 2
-        opacity: 0.8
+        width: 96 * root.u
+        height: width
+        radius: width / 2
+        color: "white"
+        border { color: "#e3170a"; width: 10 * root.u }
+        anchors { left: parent.left; leftMargin: 24 * root.u; top: parent.top; topMargin: 20 * root.u }
 
-        SequentialAnimation on opacity {
-            running: dangerBorder.visible
-            loops: Animation.Infinite
-            NumberAnimation { from: 0.2; to: 1.0; duration: 220 }
-            NumberAnimation { from: 1.0; to: 0.2; duration: 220 }
+        Text {
+            anchors.centerIn: parent
+            text: root.speedLimit
+            color: "black"
+            font { pixelSize: 44 * root.u; bold: true }
+        }
+    }
+
+    // ===== Tốc độ hiện tại (phải) =====
+    Column {
+        anchors { right: parent.right; rightMargin: 24 * root.u; top: parent.top; topMargin: 20 * root.u }
+        spacing: -6 * root.u
+
+        Text {
+            anchors.right: parent.right
+            text: root.speed
+            color: root.overSpeed ? root.warnColor : "white"
+            font { pixelSize: 72 * root.u; bold: true }
+        }
+        Text {
+            anchors.right: parent.right
+            text: "km/h"
+            color: "#cfd3d8"
+            font.pixelSize: 20 * root.u
+        }
+    }
+
+    // ===== Cảnh báo va chạm: chỉ hiện khi khoảng cách quá gần =====
+    Text {
+        anchors { left: parent.left; leftMargin: 24 * root.u; bottom: parent.bottom; bottomMargin: 16 * root.u }
+        text: "FCW"
+        color: root.warnColor
+        font { pixelSize: 24 * root.u; bold: true }
+        visible: root.collisionWarning
+    }
+
+    // ===== Khoảng cách tới xe phía trước (m) =====
+    Row {
+        id: distanceText
+        anchors { horizontalCenter: parent.horizontalCenter; bottom: parent.bottom; bottomMargin: 6 * root.u }
+        spacing: 6 * root.u
+
+        Text {
+            id: distanceValue
+            text: root.distance.toFixed(1)
+            color: root.collisionWarning ? root.warnColor : "white"
+            font { pixelSize: 60 * root.u; bold: true }
+        }
+        Text {
+            text: "m"
+            color: "#cfd3d8"
+            font.pixelSize: 22 * root.u
+            topPadding: 32 * root.u
+        }
+    }
+
+    // ===== Demo: giả lập số liệu (xoá khi nối dữ liệu thật) =====
+    Timer {
+        interval: 1000
+        running: true
+        repeat: true
+        onTriggered: {
+            root.speed = Math.max(0, Math.min(120, root.speed + Math.round(Math.random() * 6 - 3)))
+            root.distance = Math.max(0.5, Math.min(9.9, root.distance + (Math.random() * 1.6 - 0.8)))
         }
     }
 }
