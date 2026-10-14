@@ -5,7 +5,7 @@
 #include <QString>
 
 /**
- * AdasController - C++ QObject mapping exact properties required by Main.qml & HudDevice.qml:
+ * AdasController - C++ QObject mapping exact properties required by Main.qml:
  *   adasBackend.fps
  *   adasBackend.speed
  *   adasBackend.laneOffset
