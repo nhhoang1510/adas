@@ -1,0 +1,7 @@
+{
+  "hfov_deg": 70,
+  "camera_height_m": 1.35,
+  "horizon_y_ratio": 0.45,
+  "hood_y_ratio": 0.88,
+  "camera_lateral_offset_m": 0.0
+}
