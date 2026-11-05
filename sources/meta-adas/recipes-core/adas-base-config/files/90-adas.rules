@@ -1,0 +1,10 @@
+SUBSYSTEM=="graphics", KERNEL=="fb[0-9]*", \
+    ATTR{name}=="*ili9486*|*piscreen*|*fbtft*|*ili9341*|*fb_*", \
+    SYMLINK+="fb-lcd"
+
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", \
+    ATTRS{name}=="*ADS7846*|*XPT2046*|*Goodix*|*piscreen*", \
+    SYMLINK+="input/touch-lcd"
+
+SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", SUBSYSTEMS=="usb", ATTR{index}=="0", SYMLINK+="adas-cam"
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0825", ATTR{index}=="0", SYMLINK+="adas-cam"
