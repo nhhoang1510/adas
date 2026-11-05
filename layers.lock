@@ -1,0 +1,19 @@
+poky:
+  url: "https://git.yoctoproject.org/poky"
+  branch: "scarthgap"
+  commit: "4fb7016a07507683359ebd620f1951fd5ea44bfa"
+
+meta-raspberrypi:
+  url: "https://github.com/agherzan/meta-raspberrypi.git"
+  branch: "scarthgap"
+  commit: "018d44467c4f09eb63f8ea5e86e85d755250cf89"
+
+meta-openembedded:
+  url: "https://github.com/openembedded/meta-openembedded.git"
+  branch: "scarthgap"
+  commit: "0f00f8b9a21950640da8c5707343e5540133f86e"
+
+meta-qt5:
+  url: "https://github.com/meta-qt5/meta-qt5.git"
+  branch: "scarthgap"
+  commit: "916d37e38077850ff5a0ac4fce6f2a55ba5b2a86"
