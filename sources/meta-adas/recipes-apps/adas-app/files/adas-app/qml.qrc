@@ -1,0 +1,11 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>qml/Main.qml</file>
+        <file>qml/SevenSegmentDigit.qml</file>
+        <file>qml/SegmentDisplay.qml</file>
+        <file>qml/Telltale.qml</file>
+        <file>qml/PixRect.qml</file>
+        <file>qml/SignIcon.qml</file>
+    </qresource>
+</RCC>
