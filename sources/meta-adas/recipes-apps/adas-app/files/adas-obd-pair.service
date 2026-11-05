@@ -1,0 +1,16 @@
+[Unit]
+Description=ADAS: auto-pair ELM327 OBD-II Bluetooth adapter
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/adas/adas.env
+ExecStart=/usr/libexec/adas/adas-obd-pair.sh
+Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=adas-obd-pair
+
+[Install]
+WantedBy=multi-user.target

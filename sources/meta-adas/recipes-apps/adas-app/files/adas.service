@@ -1,0 +1,38 @@
+[Unit]
+Description=ADAS HMI and perception (kiosk mode)
+DefaultDependencies=no
+After=local-fs.target systemd-journald.socket systemd-udevd.service systemd-udev-trigger.service
+Wants=systemd-udevd.service systemd-udev-trigger.service
+Conflicts=shutdown.target
+Before=shutdown.target
+Conflicts=getty@tty1.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+StartLimitAction=reboot
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=10
+EnvironmentFile=/etc/adas/adas.env
+
+RuntimeDirectory=adas
+RuntimeDirectoryMode=0700
+Environment="XDG_RUNTIME_DIR=/run/adas"
+StateDirectory=adas
+Environment="XDG_CACHE_HOME=/var/lib/adas/cache" "QML_DISK_CACHE_PATH=/var/lib/adas/cache/qmlcache"
+
+ExecStart=/usr/libexec/adas/adas-launch.sh
+Restart=always
+RestartSec=2
+TimeoutStartSec=45
+
+Nice=-5
+LimitNOFILE=4096
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=adas
+
+[Install]
+WantedBy=multi-user.target

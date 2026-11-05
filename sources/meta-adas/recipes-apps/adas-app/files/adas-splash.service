@@ -1,0 +1,14 @@
+[Unit]
+Description=ADAS boot splash on the LCD
+DefaultDependencies=no
+Before=adas.service sysinit.target
+ConditionPathExists=/opt/adas/splash.rgb565
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for f in /sys/class/graphics/fb*; do grep -q ili9486 $f/name 2>/dev/null && exec dd if=/opt/adas/splash.rgb565 of=/dev/$${f##*/} bs=307200 count=1; done; exit 0'
+StandardOutput=null
+
+[Install]
+WantedBy=sysinit.target
