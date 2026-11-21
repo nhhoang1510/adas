@@ -42,7 +42,7 @@ public:
         int    max_miss_tentative = 1;
         int    max_miss_confirmed = 3;
         double max_coast_s = 1.5;
-        double max_range_m = 90.0;
+        double max_range_m = 100.0;  // phải phủ tới mốc 100 m của Điều 11
         double lane_fit_z_m = 40.0;
         double in_path_margin_m = 0.15;
         double no_lane_half_m = 1.2;
@@ -55,6 +55,7 @@ public:
         double lead_switch_margin_m = 3.0, lead_switch_hold_s = 0.3, lead_loss_hold_s = 0.4;
         double dist_warn_m = 18.0, dist_brake_m = 10.0;
         double headway_warn_s = 0.8;
+        bool   art11_enable = true;
         double close_warn_m = 6.0, close_brake_m = 3.5;
         double fcw_down_s = 0.5;
         double closing_min_age_s = 0.8;
@@ -64,7 +65,21 @@ public:
     VehicleTracker() = default;
     explicit VehicleTracker(const Params& p) : m_p(p) {}
 
-    void reset() { m_tracks.clear(); m_leadId = -1; m_lastT = -1; m_fcwLvl = 0; }
+    void reset() { m_tracks.clear(); m_leadId = -1; m_lastT = -1; m_fcwLvl = 0; m_art11Req = 0; }
+
+    // Khoảng cách an toàn tối thiểu (m) theo Điều 11, Thông tư 38/2024/TT-BGTVT,
+    // mặt đường khô ráo. Trả về 0 khi dưới 60 km/h (luật không ấn định số mét)
+    // hoặc khi không biết tốc độ. Tốc độ được làm tròn về km/h nguyên như OBD-II
+    // trả về, để mốc "bằng 60" không bị lệch do sai số dấu phẩy động.
+    static int art11MinGapM(double ego_speed_mps) {
+        if (ego_speed_mps < 0) return 0;
+        const long kph = std::lround(ego_speed_mps * 3.6);
+        if (kph < 60)   return 0;
+        if (kph == 60)  return 35;
+        if (kph <= 80)  return 55;
+        if (kph <= 100) return 70;
+        return 100;
+    }
     void setPathCurvature(double k) { m_pathK = k; }
 
     const std::vector<TrackedVehicle>& step(double t, const std::vector<VehicleDetection>* dets,
@@ -245,6 +260,7 @@ private:
     double m_candT = 0.0, m_leadLostT = -1.0;
     double m_lastT = -1.0;
     int    m_fcwLvl = 0;
+    int    m_art11Req = 0;  // ngưỡng Điều 11 đang hiển thị; giữ nguyên trong lúc cảnh báo còn được lưu
     int    m_frameW = 640;
     double m_fcwDownT = -1.0;
 
@@ -469,6 +485,7 @@ private:
 
     void computeFcw(double t, double ego_speed) {
         int raw = 0;
+        int art11_req = 0;  // > 0 khi cảnh báo mức 1 chỉ do vi phạm Điều 11
         if (m_lead.has_lead) {
             const auto& v = m_lead.lead;
             const Track* LT = find(m_leadId);
@@ -479,7 +496,12 @@ private:
                 (closing && v.z < m_p.close_brake_m)) raw = 2;
             else if ((moving && v.z <= m_p.dist_warn_m) ||
                      headway < m_p.headway_warn_s || (closing && v.z < m_p.close_warn_m)) raw = 1;
+            else if (m_p.art11_enable) {
+                const int req = art11MinGapM(ego_speed);
+                if (req > 0 && v.z < req) { raw = 1; art11_req = req; }
+            }
         }
+        if (raw != 0) m_art11Req = art11_req;  // raw == 0: giữ lý do cũ cho tới khi cảnh báo tắt hẳn
         if (raw > m_fcwLvl) { m_fcwLvl = raw; m_fcwDownT = -1; }
         else if (raw < m_fcwLvl) {
             if (m_fcwDownT < 0) m_fcwDownT = t;
@@ -489,6 +511,8 @@ private:
         m_lead.fcw_level = m_fcwLvl;
         const std::string tag = (m_lead.has_lead && m_lead.lead.cut_in) ? " [TAT DAU!]" : "";
         m_lead.fcw_text = m_fcwLvl == 2 ? "NGUY HIEM: PHANH GAP!" + tag
-                        : m_fcwLvl == 1 ? "CHU Y: GIU KHOANG CACH" + tag : "AN TOAN";
+                        : m_fcwLvl == 1 ? (m_art11Req > 0 ? "CHU Y: KHOANG CACH < " + std::to_string(m_art11Req) + "m"
+                                                         : std::string("CHU Y: GIU KHOANG CACH")) + tag
+                        : "AN TOAN";
     }
 };
