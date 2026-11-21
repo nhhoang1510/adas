@@ -42,12 +42,13 @@ int main(int argc, char** argv) {
     if (assumeKph > 0) adas.setEgoSpeedKph(assumeKph);
 
     cv::VideoWriter writer; bool writerTried = false;
-    cv::Mat frame, small;
+    cv::Mat frame, small, full;
     int n = 0; double sumFast = 0; auto tStart = std::chrono::steady_clock::now();
     while (cap.read(frame)) {
+        full = frame.cols > 640 ? frame : cv::Mat();
         if (frame.cols != 640) { cv::resize(frame, small, cv::Size(640, int(std::lround(frame.rows * 640.0 / frame.cols))), 0, 0, cv::INTER_AREA); frame = small; }
         const double t = isVideo ? n / fps : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        const AdasOutput& o = adas.step(frame, t);
+        const AdasOutput& o = adas.step(frame, t, full.empty() ? nullptr : &full);
         sumFast += o.fast_ms;
         if (!out.empty()) {
             if (!writerTried) { writerTried = true; if (!writer.open(out, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, frame.size())) std::fprintf(stderr, "cannot write %s (HUD disabled)\n", out.c_str()); }

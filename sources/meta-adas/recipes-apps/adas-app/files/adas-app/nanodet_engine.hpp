@@ -64,8 +64,10 @@ public:
         return m_cfg.input_h - farTop(int(std::lround(roadH * s)));
     }
 
+    // far: vùng nhìn xa, tính theo toạ độ của `road`. farPatch (tuỳ chọn): chính vùng đó nhưng lấy từ
+    // ảnh gốc độ phân giải cao hơn; để trống thì cắt thẳng từ `road` ở tỉ lệ 1:1 như trước.
     std::vector<VehicleDetection> infer(const cv::Mat& road, double* out_ms = nullptr, bool* ok = nullptr,
-                                        const cv::Rect& far = cv::Rect()) {
+                                        const cv::Rect& far = cv::Rect(), const cv::Mat& farPatch = cv::Mat()) {
         std::vector<VehicleDetection> dets;
         if (ok) *ok = false;
         if (road.empty() || road.type() != CV_8UC3) return dets;
@@ -75,10 +77,15 @@ public:
         const int mainH = int(std::lround(road.rows * scale));
         cv::Rect farR = far & cv::Rect(0, 0, road.cols, road.rows);
         const int fy0 = farTop(mainH);
-        if (farR.width > 0 && farR.height > 0 && farR.width <= m_cfg.input_w && farR.height <= m_cfg.input_h - fy0)
-            road(farR).copyTo(m_lb(cv::Rect(0, fy0, farR.width, farR.height)));
-        else farR = cv::Rect();
+        cv::Mat patch;
+        if (farR.width > 0 && farR.height > 0)
+            patch = (!farPatch.empty() && farPatch.type() == CV_8UC3 && farR == far) ? farPatch : road(farR);
+        if (!patch.empty() && patch.cols <= m_cfg.input_w && patch.rows <= m_cfg.input_h - fy0)
+            patch.copyTo(m_lb(cv::Rect(0, fy0, patch.cols, patch.rows)));
+        else { farR = cv::Rect(); patch = cv::Mat(); }
         m_far = farR; m_farY0 = fy0; m_mainH = mainH;
+        m_farPW = patch.cols; m_farPH = patch.rows;
+        m_farS = patch.empty() ? 1.f : float(farR.width) / patch.cols;
 
         if (m_usesOrt && m_ortSession) {
             const int hw = m_cfg.input_h * m_cfg.input_w;
@@ -158,6 +165,8 @@ private:
     cv::Mat m_lb;
     cv::Rect m_far;
     int m_farY0 = 0, m_mainH = 0;
+    int m_farPW = 0, m_farPH = 0;  // kích thước mảnh nhìn xa trong ảnh đưa vào model
+    float m_farS = 1.f;            // số pixel của `road` ứng với 1 pixel của mảnh nhìn xa
     static int farTop(int mainH) { return ((mainH + 8 + 31) / 32) * 32; }
     std::vector<float> m_input;
 
@@ -280,13 +289,13 @@ private:
                     VehicleDetection v;
                     const float ix1 = cx - d[0], iy1 = cy - d[1], ix2 = cx + d[2], iy2 = cy + d[3];
                     if (m_far.width > 0 && iy2 > m_mainH + 2) {
-                        const float fx2 = float(m_far.width), fy2 = float(m_farY0 + m_far.height);
+                        const float fx2 = float(m_farPW), fy2 = float(m_farY0 + m_farPH);
                         if (iy1 < m_farY0 - 1 || iy2 > fy2 - 1 || (ix1 < 1 && m_far.x > 0) ||
                             (ix2 > fx2 - 1 && m_far.x + m_far.width < cw) || ix2 > fx2 + 1) continue;
-                        v.box.x1 = std::clamp(ix1 + m_far.x, 0.f, float(cw));
-                        v.box.y1 = std::clamp(iy1 - m_farY0 + m_far.y, 0.f, float(ch));
-                        v.box.x2 = std::clamp(ix2 + m_far.x, 0.f, float(cw));
-                        v.box.y2 = std::clamp(iy2 - m_farY0 + m_far.y, 0.f, float(ch));
+                        v.box.x1 = std::clamp(ix1 * m_farS + m_far.x, 0.f, float(cw));
+                        v.box.y1 = std::clamp((iy1 - m_farY0) * m_farS + m_far.y, 0.f, float(ch));
+                        v.box.x2 = std::clamp(ix2 * m_farS + m_far.x, 0.f, float(cw));
+                        v.box.y2 = std::clamp((iy2 - m_farY0) * m_farS + m_far.y, 0.f, float(ch));
                         v.far = true;
                     } else {
                         v.box.x1 = std::clamp(ix1 * inv, 0.f, float(cw));
@@ -297,7 +306,8 @@ private:
                     v.box.conf = score;
                     v.box.cls = vc;
                     const float bw = v.box.x2 - v.box.x1, bh = v.box.y2 - v.box.y1;
-                    if (bw < m_cfg.min_box_px || bh < m_cfg.min_box_px) continue;
+                    const float minPx = m_cfg.min_box_px * (v.far ? m_farS : 1.f);  // ngưỡng tính theo pixel model thấy
+                    if (bw < minPx || bh < minPx) continue;
                     if (!plausibleAspect(vc, bw, bh)) continue;
                     dets.push_back(v);
                 }

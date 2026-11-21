@@ -97,7 +97,8 @@ public:
     void setEgoSpeedKph(double kph) { m_egoMps.store(kph < 0 ? -1.0 : kph / 3.6, std::memory_order_relaxed); }
     void setTurnSignals(bool left, bool right) { m_turnL.store(left); m_turnR.store(right); }
 
-    const AdasOutput& step(const cv::Mat& frame, double t) {
+    // hires (tuỳ chọn): cùng khung hình ở độ phân giải gốc của camera, dùng cho vùng nhìn xa.
+    const AdasOutput& step(const cv::Mat& frame, double t, const cv::Mat* hires = nullptr) {
         const auto t0 = std::chrono::steady_clock::now();
         const int W = frame.cols, H = frame.rows;
         AdasOutput& o = m_out;
@@ -106,6 +107,8 @@ public:
         if (!m_aiBusy.load(std::memory_order_acquire)) {
             const int slot = m_frameSlot.load(std::memory_order_relaxed) ^ 1;
             frame.copyTo(m_frameBuf[slot]);
+            if (hires && !hires->empty() && hires->cols > frame.cols) hires->copyTo(m_hiBuf[slot]);
+            else m_hiBuf[slot].release();
             m_frameT[slot] = t;
             m_frameSlot.store(slot, std::memory_order_release);
             m_aiBusy.store(true, std::memory_order_release);
@@ -233,6 +236,7 @@ private:
     AdasOutput m_out;
 
     cv::Mat m_frameBuf[2];
+    cv::Mat m_hiBuf[2];
     double m_frameT[2] = {0, 0};
     std::atomic<int> m_frameSlot{0};
     std::atomic<bool> m_aiBusy{false};
@@ -288,7 +292,7 @@ private:
             const int slot = m_frameSlot.load(std::memory_order_acquire);
             const cv::Mat& f = m_frameBuf[slot];
             if (!f.empty() && engine.ready()) {
-                DualEnginePipeline::Result r = engine.step(f);
+                DualEnginePipeline::Result r = engine.step(f, -1.0, 0, &m_hiBuf[slot]);
                 AiResult& dst = m_res[(m_resWrite + 1) % 3];
                 m_resSeq.store(2 * (m_resWrite + 1) - 1, std::memory_order_release);
                 dst.dets = r.vehicles;

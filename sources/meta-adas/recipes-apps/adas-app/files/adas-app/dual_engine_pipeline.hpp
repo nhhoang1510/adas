@@ -21,6 +21,9 @@ public:
     double det_hz = 15.0;
     double det_horizon_pos = 0.08;
     bool det_far = [] { const char* e = getenv("ADAS_DET_FAR"); return !(e && e[0] == '0'); }();
+    // Độ phóng tối đa của vùng nhìn xa khi có ảnh gốc độ phân giải cao (1 = như cũ, cắt từ ảnh 640).
+    double far_zoom_max = [] { const char* e = getenv("ADAS_FAR_ZOOM"); return (e && *e) ? std::max(1.0, atof(e)) : 2.0; }();
+    bool far_alternate = [] { const char* e = getenv("ADAS_FAR_ALT"); return !(e && e[0] == '0'); }();
     int crop_quant_px = 8;
     int crop_hysteresis_px = 16;
     double night_luma_on = 55.0;
@@ -80,8 +83,10 @@ public:
     return true;
   }
 
+  // hires (tuỳ chọn): cùng khung hình với `frame` nhưng ở độ phân giải gốc của camera, cùng tỉ lệ
+  // khung. Khi có, vùng nhìn xa được lấy từ đó để xe ở xa chiếm nhiều pixel hơn.
   Result step(const cv::Mat &frame, double raw_horizon = -1.0,
-              int raw_inliers = 0) {
+              int raw_inliers = 0, const cv::Mat *hires = nullptr) {
     Result r = m_last;
     r.det_fresh = false;
     if (frame.empty())
@@ -117,18 +122,35 @@ public:
           stableCrop(W, H, m_det.config().input_w, m_det.config().input_h,
                      r.horizon_y, m_cfg.det_horizon_pos, m_detCropY);
       cv::Rect far;
+      cv::Mat farPatch;
       if (m_cfg.det_far) {
         const int fh = std::min(m_det.freeRows(crop.width, crop.height), crop.height);
         const int fw = std::min(m_det.config().input_w, crop.width);
         if (fh >= 64 && fw < crop.width) {
-          const int fx = std::clamp(int(std::lround(m_cfg.calib.vanish_x_ratio * W)) - fw / 2, 0, crop.width - fw);
-          const int fy = std::clamp(int(std::lround(r.horizon_y)) - crop.y - int(0.6 * fh), 0, crop.height - fh);
-          far = cv::Rect(fx, fy, fw, fh);
+          const bool hi = hires && !hires->empty() && hires->type() == CV_8UC3;
+          const double kx = hi ? double(hires->cols) / W : 1.0, ky = hi ? double(hires->rows) / H : 1.0;
+          // Xen kẽ: lượt lẻ dùng vùng phóng to (xe ở rất xa), lượt chẵn dùng vùng 1:1 như cũ.
+          // Vùng 1:1 vẫn cần thiết vì nó là thứ bắt được xe máy và xe cỡ vừa ở tầm 10-40 m.
+          const bool zoomTurn = !m_cfg.far_alternate || (m_farTick++ & 1u);
+          const double zoom = zoomTurn ? std::min(m_cfg.far_zoom_max, kx) : 1.0;
+          // vùng nhìn xa trên ảnh 640: nhỏ đi `zoom` lần, vẫn đặt quanh điểm tụ
+          const int rw = zoom > 1.01 ? int(fw / zoom) : fw, rh = zoom > 1.01 ? int(fh / zoom) : fh;
+          const int fx = std::clamp(int(std::lround(m_cfg.calib.vanish_x_ratio * W)) - rw / 2, 0, crop.width - rw);
+          const int fy = std::clamp(int(std::lround(r.horizon_y)) - crop.y - int(0.6 * rh), 0, crop.height - rh);
+          far = cv::Rect(fx, fy, rw, rh);
+          if (zoom > 1.01) {
+            const cv::Rect src = cv::Rect(int(std::lround(fx * kx)), int(std::lround((fy + crop.y) * ky)),
+                                          int(std::lround(rw * kx)), int(std::lround(rh * ky))) &
+                                 cv::Rect(0, 0, hires->cols, hires->rows);
+            if (src.width > 0 && src.height > 0)
+              cv::resize((*hires)(src), farPatch, cv::Size(fw, fh), 0, 0,
+                         src.width > fw ? cv::INTER_AREA : cv::INTER_LINEAR);
+          }
         }
       }
       double ms = 0.0;
       bool ok = false;
-      auto dets = m_det.infer(frame(crop), &ms, &ok, far);
+      auto dets = m_det.infer(frame(crop), &ms, &ok, far, farPatch);
       m_lastDetT = t0;
       if (ok) {
         std::vector<VehicleDetection> keep;
@@ -183,6 +205,7 @@ private:
   clock::time_point m_lastDetT{}, m_lastLogT{};
   int m_detCropY = -1;
   int m_detRuns = 0;
+  unsigned m_farTick = 0;
   int m_frameW = 640, m_frameH = 480;
 
   static double secondsSince(clock::time_point a, clock::time_point b) {

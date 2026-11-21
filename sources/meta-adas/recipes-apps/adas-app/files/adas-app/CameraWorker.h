@@ -387,6 +387,7 @@ protected:
                 int64 t_frame_start = cv::getTickCount();
                 const auto tp0 = std::chrono::steady_clock::now();
 
+                cv::Mat hires_frame;  // khung hình gốc khi camera thu lớn hơn 640, dùng cho vùng nhìn xa của AI
                 if (has_cam) {
                     cv::Mat raw_frame;
                     if (!cap.read(raw_frame) || raw_frame.empty()) {
@@ -426,6 +427,7 @@ protected:
                         cv::Mat resized;
                         cv::resize(raw_frame, resized, cv::Size(target_w, target_h), 0, 0, cv::INTER_LINEAR);
                         frame = resized;
+                        hires_frame = raw_frame;
                     } else {
                         frame = raw_frame;
                     }
@@ -486,6 +488,10 @@ protected:
                     if (m_onnxReady.load(std::memory_order_relaxed) && !m_onnxBusy.load(std::memory_order_relaxed)) {
                         m_onnxBusy.store(true, std::memory_order_relaxed);
                         m_onnxFrame.store(m_frameCounter, std::memory_order_relaxed);
+                        {
+                            std::lock_guard<std::mutex> lk(m_hiresMtx);
+                            m_onnxHires = hires_frame.empty() ? cv::Mat() : hires_frame.clone();
+                        }
                         m_onnxQueue.push(frame.clone());
                     }
 
@@ -660,27 +666,41 @@ private:
             devices.push_back("/dev/video" + std::to_string(i));
         }
 
+        // ADAS_CAM_SIZE=1280x720 (hoặc 1920x1080): thu hình lớn hơn để AI nhìn xa hơn; phần còn lại của
+        // pipeline vẫn chạy trên ảnh thu nhỏ về 640. Camera không hỗ trợ cỡ đó thì tự lùi về 640x480.
+        std::vector<std::pair<int, int>> sizes;
+        {
+            const char* v = getenv("ADAS_CAM_SIZE");
+            int w = 0, h = 0;
+            if (v && std::sscanf(v, "%dx%d", &w, &h) == 2 && w > 640 && w <= 1920 && h >= 360 && h <= 1080) sizes.emplace_back(w, h);
+            sizes.emplace_back(640, 480);
+        }
+
         for (const auto& dev : devices) {
             if (access(dev.c_str(), R_OK) != 0) continue;
             if (!isRealCaptureCamera(dev)) continue;
 
-            std::string pipe1 = "v4l2src device=" + dev + " do-timestamp=true ! "
-                                "image/jpeg,width=640,height=480,framerate=30/1 ! "
-                                "jpegdec ! videoconvert ! "
-                                "video/x-raw,format=BGR ! "
-                                "appsink drop=true max-buffers=1 sync=false";
-            if (tryGStreamerPipeline(cap, pipe1, activePipeline, dev + " [GStreamer MJPEG]")) {
-                qInfo("[CameraWorker] GStreamer MJPEG pipeline opened on %s", dev.c_str());
-                return true;
-            }
+            for (const auto& sz : sizes) {
+                const std::string dim = "width=" + std::to_string(sz.first) + ",height=" + std::to_string(sz.second);
+                const std::string tag = " " + std::to_string(sz.first) + "x" + std::to_string(sz.second) + "]";
+                std::string pipe1 = "v4l2src device=" + dev + " do-timestamp=true ! "
+                                    "image/jpeg," + dim + ",framerate=30/1 ! "
+                                    "jpegdec ! videoconvert ! "
+                                    "video/x-raw,format=BGR ! "
+                                    "appsink drop=true max-buffers=1 sync=false";
+                if (tryGStreamerPipeline(cap, pipe1, activePipeline, dev + " [GStreamer MJPEG" + tag)) {
+                    qInfo("[CameraWorker] GStreamer MJPEG pipeline opened on %s (%dx%d)", dev.c_str(), sz.first, sz.second);
+                    return true;
+                }
 
-            std::string pipe2 = "v4l2src device=" + dev + " do-timestamp=true ! "
-                                "video/x-raw,width=640,height=480,framerate=30/1 ! "
-                                "videoconvert ! video/x-raw,format=BGR ! "
-                                "appsink drop=true max-buffers=1 sync=false";
-            if (tryGStreamerPipeline(cap, pipe2, activePipeline, dev + " [GStreamer YUYV]")) {
-                qInfo("[CameraWorker] GStreamer YUYV pipeline opened on %s", dev.c_str());
-                return true;
+                std::string pipe2 = "v4l2src device=" + dev + " do-timestamp=true ! "
+                                    "video/x-raw," + dim + ",framerate=30/1 ! "
+                                    "videoconvert ! video/x-raw,format=BGR ! "
+                                    "appsink drop=true max-buffers=1 sync=false";
+                if (tryGStreamerPipeline(cap, pipe2, activePipeline, dev + " [GStreamer YUYV" + tag)) {
+                    qInfo("[CameraWorker] GStreamer YUYV pipeline opened on %s (%dx%d)", dev.c_str(), sz.first, sz.second);
+                    return true;
+                }
             }
 
             std::string pipe3 = "v4l2src device=" + dev + " ! videoconvert ! video/x-raw,format=BGR ! "
@@ -691,8 +711,8 @@ private:
             }
 
             if (cap.open(dev, cv::CAP_V4L2)) {
-                cap.set(cv::CAP_PROP_FRAME_WIDTH, 640);
-                cap.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
+                cap.set(cv::CAP_PROP_FRAME_WIDTH, sizes.front().first);
+                cap.set(cv::CAP_PROP_FRAME_HEIGHT, sizes.front().second);
                 cv::Mat test;
                 if (cap.read(test) && !test.empty()) {
                     activePipeline = dev + " [V4L2]";
@@ -916,7 +936,12 @@ private:
                             m_calibPending = false;
                         }
                     }
-                    auto r = dualEngine->step(frame);
+                    cv::Mat hires;
+                    {
+                        std::lock_guard<std::mutex> lk(m_hiresMtx);
+                        hires = m_onnxHires;
+                    }
+                    auto r = dualEngine->step(frame, -1.0, 0, &hires);
                     std::lock_guard<std::mutex> lk(m_fusionMtx);
                     if (r.det_fresh) {
                         m_cachedDetMs = r.det_ms;
@@ -1725,6 +1750,8 @@ private:
     std::atomic<bool> m_onnxReady;
     std::atomic<bool> m_onnxBusy;
     OnnxFrameQueue<cv::Mat> m_onnxQueue;
+    std::mutex m_hiresMtx;
+    cv::Mat m_onnxHires;  // khung hình gốc đi kèm khung 640 đang nằm trong m_onnxQueue
 
     std::mutex      m_fusionMtx;
     std::vector<VehicleDetection> m_cachedVehicles;
